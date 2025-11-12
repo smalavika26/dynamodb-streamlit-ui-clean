@@ -3,50 +3,60 @@ import boto3
 import pandas as pd
 import time
 import os
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key
 
-# -------------------------------
-# INITIAL SETUP
-# -------------------------------
+# ---------------------------------------
+# LOAD ENVIRONMENT
+# ---------------------------------------
 load_dotenv()
 
-# Persistent DynamoDB connection
-if "dynamodb" not in st.session_state:
-    st.session_state.dynamodb = boto3.resource(
+# Streamlit page setup
+st.set_page_config(page_title="DynamoDB Streamlit UI", layout="wide")
+
+# ---------------------------------------
+# DYNAMODB CLIENT (optimized)
+# ---------------------------------------
+if "dynamodb_client" not in st.session_state:
+    st.session_state.dynamodb_client = boto3.client(
         "dynamodb",
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         region_name=os.getenv("AWS_REGION")
     )
 
-dynamodb = st.session_state.dynamodb
+dynamodb_client = st.session_state.dynamodb_client
 
-# Persistent table name and log
+# Warm up connection once (reduces latency)
+try:
+    dynamodb_client.list_tables()
+except Exception:
+    pass
+
+# Persistent session variables
 if "table_name" not in st.session_state:
     st.session_state.table_name = ""
 
 if "log" not in st.session_state:
     st.session_state.log = []
 
-# -------------------------------
-# APP STYLE CONFIG
-# -------------------------------
-st.set_page_config(page_title="DynamoDB Utility Dashboard", layout="wide")
 
-# Apply custom CSS
+# ---------------------------------------
+# CUSTOM STYLING
+# ---------------------------------------
 st.markdown("""
     <style>
         .main-title {
-            font-size: 28px !important;
-            font-weight: 700 !important;
-            color: #003366 !important;
+            font-size: 26px;
+            font-weight: 700;
+            color: #003366;
             margin-bottom: 20px;
         }
         .card {
             background-color: #f9f9f9;
-            padding: 1.5rem;
+            padding: 1.2rem;
             border-radius: 12px;
             box-shadow: 0 4px 10px rgba(0,0,0,0.05);
             margin-bottom: 1rem;
@@ -58,6 +68,7 @@ st.markdown("""
             border-radius: 10px;
             text-align: center;
             font-weight: 600;
+            margin-top: 10px;
         }
         .stButton>button {
             border-radius: 10px;
@@ -72,131 +83,178 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# -------------------------------
+
+# ---------------------------------------
 # SIDEBAR NAVIGATION
-# -------------------------------
+# ---------------------------------------
 st.sidebar.title("⚙️ DynamoDB Utilities")
 st.sidebar.markdown("---")
 menu = st.sidebar.radio(
-    "📂 Select an action:",
+    "Select an Action:",
     ["🏗️ Create Table", "🧾 Insert Records", "📦 Fetch Records", "🔍 Query Record", "🗒️ Activity Log"]
 )
 
-# -------------------------------
-# CORE FUNCTIONS
-# -------------------------------
+
+# ---------------------------------------
+# CREATE TABLE
+# ---------------------------------------
 def create_table(table_name):
     try:
-        existing_tables = [t.name for t in dynamodb.tables.all()]
-        if table_name in existing_tables:
+        tables = dynamodb_client.list_tables().get("TableNames", [])
+        if table_name in tables:
             st.warning(f"⚠️ Table '{table_name}' already exists.")
             return
-        table = dynamodb.create_table(
+
+        dynamodb_client.create_table(
             TableName=table_name,
             KeySchema=[
-                {"AttributeName": "date", "KeyType": "HASH"},
-                {"AttributeName": "id", "KeyType": "RANGE"},
+                {"AttributeName": "id", "KeyType": "HASH"},   # Partition key
+                {"AttributeName": "date", "KeyType": "RANGE"} # Sort key
             ],
             AttributeDefinitions=[
-                {"AttributeName": "date", "AttributeType": "S"},
                 {"AttributeName": "id", "AttributeType": "S"},
+                {"AttributeName": "date", "AttributeType": "S"}
             ],
-            BillingMode="PAY_PER_REQUEST",
+            BillingMode="PAY_PER_REQUEST"
         )
-        table.meta.client.get_waiter("table_exists").wait(TableName=table_name)
         st.success(f"✅ Table '{table_name}' created successfully!")
         st.session_state.log.append(f"✅ Created table '{table_name}'.")
     except Exception as e:
         st.error(f"❌ Error creating table: {e}")
         st.session_state.log.append(f"❌ Create table failed: {e}")
 
+
+# ---------------------------------------
+# INSERT RECORDS
+# ---------------------------------------
 def insert_records(table_name, num_rows):
     try:
-        table = dynamodb.Table(table_name)
-        start = time.time()
-        with table.batch_writer() as batch:
+        start_time = time.perf_counter_ns()
+
+        # Generate valid dates for each record
+        base_date = datetime(2025, 11, 1)
+        with st.spinner("Inserting records..."):
             for i in range(num_rows):
+                date_str = (base_date + timedelta(days=i)).strftime("%Y-%m-%dT%H:%M:%SZ")
                 item = {
-                    "date": f"2025-11-{10+i}",
-                    "id": str(i + 1),
-                    "factory_name": f"Factory_{(i % 3) + 1}",
-                    "metric": f"Metric_{i+1}",
-                    "value": i * 10,
+                    "id": {"S": f"{1000 + i}"},  # e.g., id = 1000, 1001, ...
+                    "date": {"S": date_str},
+                    "factory_name": {"S": f"Factory_{(i % 3) + 1}"},
+                    "metric": {"S": f"Metric_{i+1}"},
+                    "value": {"N": str(i * 10)}
                 }
-                batch.put_item(Item=item)
-        end = time.time()
-        latency = (end - start) * 1000
-        st.success(f"✅ Inserted {num_rows} records successfully in {latency:.2f} ms.")
+                dynamodb_client.put_item(TableName=table_name, Item=item)
+
+        end_time = time.perf_counter_ns()
+        latency_ms = (end_time - start_time) / 1_000_000
+        st.success(f"✅ Inserted {num_rows} records successfully in {latency_ms:.2f} ms.")
         st.session_state.log.append(f"✅ Inserted {num_rows} into '{table_name}'.")
     except Exception as e:
-        st.error(f"❌ Error inserting: {e}")
+        st.error(f"❌ Error inserting records: {e}")
         st.session_state.log.append(f"❌ Insert failed: {e}")
 
+
+# ---------------------------------------
+# FETCH RECORDS
+# ---------------------------------------
 def fetch_records(table_name):
     try:
-        table = dynamodb.Table(table_name)
-        start = time.time()
-        response = table.scan()
-        end = time.time()
-        latency = (end - start) * 1000
-        data = response.get("Items", [])
-        if not data:
+        start = time.perf_counter_ns()
+        response = dynamodb_client.scan(TableName=table_name)
+        end = time.perf_counter_ns()
+        latency_ms = (end - start) / 1_000_000
+
+        items = response.get("Items", [])
+        if not items:
             st.info("No records found.")
             return
-        df = pd.DataFrame(data)
+
+        # Convert to DataFrame
+        df = pd.DataFrame([{k: list(v.values())[0] for k, v in item.items()} for item in items])
         st.markdown("### 📊 Fetched Data")
         st.dataframe(df, use_container_width=True)
-        st.markdown(f"**⏱️ Latency:** {latency:.2f} ms")
-    except Exception as e:
-        st.error(f"❌ Error fetching: {e}")
+        st.markdown(f"**⏱️ Latency:** {latency_ms:.2f} ms")
 
+        st.session_state.log.append(f"✅ Fetched {len(df)} records from '{table_name}' in {latency_ms:.2f} ms.")
+    except Exception as e:
+        st.error(f"❌ Error fetching records: {e}")
+        st.session_state.log.append(f"❌ Fetch failed: {e}")
+
+
+# ---------------------------------------
+# QUERY RECORD
+# ---------------------------------------
 def query_record_ui():
     st.markdown("### 🔍 Query a Specific Record")
+
     table_name = st.text_input("Enter Table Name:", st.session_state.table_name)
     st.session_state.table_name = table_name
 
     if not table_name:
-        st.info("Enter a valid table name to continue.")
+        st.info("Please enter a table name to continue.")
         return
 
-    table = dynamodb.Table(table_name)
     try:
-        scan_dates = table.scan(ProjectionExpression="#d", ExpressionAttributeNames={"#d": "date"})
-        dates = sorted({item["date"] for item in scan_dates.get("Items", [])})
+        # Get all ids
+        response = dynamodb_client.scan(TableName=table_name, ProjectionExpression="id")
+        ids = sorted({item["id"]["S"] for item in response.get("Items", [])})
+        if not ids:
+            st.warning("⚠️ No IDs found in the table.")
+            return
+
+        selected_id = st.selectbox("Select ID:", ids)
+
+        # Get dates for the selected ID
+        query_resp = dynamodb_client.query(
+            TableName=table_name,
+            KeyConditionExpression="id = :id",
+            ExpressionAttributeValues={":id": {"S": selected_id}},
+            ProjectionExpression="date"
+        )
+        dates = sorted({item["date"]["S"] for item in query_resp.get("Items", [])})
+
         if not dates:
-            st.warning("⚠️ No data available.")
+            st.warning("⚠️ No dates found for this ID.")
             return
 
         selected_date = st.selectbox("Select Date:", dates)
-        ids = [item["id"] for item in table.query(KeyConditionExpression=Key("date").eq(selected_date))["Items"]]
-        selected_id = st.selectbox("Select Record ID:", ids)
 
         if st.button("Query Record"):
-            start = time.perf_counter()
-            result = table.get_item(Key={"date": selected_date, "id": selected_id})
-            end = time.perf_counter()
-            latency = (end - start) * 1000
+            start = time.perf_counter_ns()
+            result = dynamodb_client.get_item(
+                TableName=table_name,
+                Key={"id": {"S": selected_id}, "date": {"S": selected_date}}
+            )
+            end = time.perf_counter_ns()
+            latency_ms = (end - start) / 1_000_000
 
             item = result.get("Item")
             if not item:
-                st.warning("⚠️ No record found.")
+                st.warning("⚠️ Record not found.")
                 return
 
+            item_dict = {k: list(v.values())[0] for k, v in item.items()}
+
+            # Display the record neatly
             st.markdown("### 🎯 Query Result")
-            with st.container():
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown(f"<div class='card'><b>Date:</b> {item['date']}<br><b>ID:</b> {item['id']}</div>", unsafe_allow_html=True)
-                with col2:
-                    st.markdown(f"<div class='card'><b>Factory:</b> {item['factory_name']}<br><b>Metric:</b> {item['metric']}<br><b>Value:</b> {item['value']}</div>", unsafe_allow_html=True)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"<div class='card'><b>ID:</b> {item_dict['id']}<br><b>Date:</b> {item_dict['date']}</div>", unsafe_allow_html=True)
+            with col2:
+                st.markdown(f"<div class='card'><b>Factory:</b> {item_dict['factory_name']}<br><b>Metric:</b> {item_dict['metric']}<br><b>Value:</b> {item_dict['value']}</div>", unsafe_allow_html=True)
 
-            st.markdown(f"<div class='metric-card'>⏱️ Latency: {latency:.2f} ms</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-card'>⏱️ Latency: {latency_ms:.2f} ms</div>", unsafe_allow_html=True)
+            st.session_state.log.append(f"✅ Queried record ({selected_id}, {selected_date}) in {latency_ms:.2f} ms.")
+
+    except ClientError as e:
+        st.error(f"AWS Error: {e.response['Error']['Message']}")
     except Exception as e:
-        st.error(f"❌ Error querying record: {e}")
+        st.error(f"Error: {e}")
 
-# -------------------------------
-# MAIN APP LAYOUT
-# -------------------------------
+
+# ---------------------------------------
+# MAIN LAYOUT HANDLER
+# ---------------------------------------
 if menu == "🏗️ Create Table":
     st.markdown("<div class='main-title'>🏗️ Create DynamoDB Table</div>", unsafe_allow_html=True)
     table_name = st.text_input("Enter Table Name:", st.session_state.table_name)
