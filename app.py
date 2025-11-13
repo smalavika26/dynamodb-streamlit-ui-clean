@@ -158,9 +158,17 @@ def insert_records(table_name, num_rows):
 # FETCH RECORDS
 # ---------------------------------------
 def fetch_records(table_name):
+    """Scan and display all records with latency info."""
     try:
         start = time.perf_counter_ns()
-        response = dynamodb_client.scan(TableName=table_name)
+        response = dynamodb_client.scan(
+            TableName=table_name,
+            ProjectionExpression="#d, id, date_str, factory_name, metric, #v",
+            ExpressionAttributeNames={
+                "#d": "date",
+                "#v": "value"
+            }
+        )
         end = time.perf_counter_ns()
         latency_ms = (end - start) / 1_000_000
 
@@ -169,16 +177,16 @@ def fetch_records(table_name):
             st.info("No records found.")
             return
 
-        # Convert to DataFrame
         df = pd.DataFrame([{k: list(v.values())[0] for k, v in item.items()} for item in items])
+        df["date"] = df["date"].astype(str)
         st.markdown("### 📊 Fetched Data")
         st.dataframe(df, use_container_width=True)
         st.markdown(f"**⏱️ Latency:** {latency_ms:.2f} ms")
-
         st.session_state.log.append(f"✅ Fetched {len(df)} records from '{table_name}' in {latency_ms:.2f} ms.")
     except Exception as e:
         st.error(f"❌ Error fetching records: {e}")
         st.session_state.log.append(f"❌ Fetch failed: {e}")
+
 
 
 # ---------------------------------------
@@ -206,11 +214,13 @@ def query_record_ui():
 
         # Get dates for the selected ID
         query_resp = dynamodb_client.query(
-            TableName=table_name,
-            KeyConditionExpression="id = :id",
-            ExpressionAttributeValues={":id": {"S": selected_id}},
-            ProjectionExpression="date"
-        )
+    TableName=table_name,
+    KeyConditionExpression="id = :id",
+    ExpressionAttributeValues={":id": {"S": selected_id}},
+    ProjectionExpression="#d, date_str",
+    ExpressionAttributeNames={"#d": "date"}
+)
+
         dates = sorted({item["date"]["S"] for item in query_resp.get("Items", [])})
 
         if not dates:
